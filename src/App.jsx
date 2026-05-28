@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard.jsx'
 import Clients from './pages/Clients.jsx'
 import TestBooking from './pages/TestBooking.jsx'
 import Logs from './pages/Logs.jsx'
+import VapiSetup from './pages/VapiSetup.jsx'
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="clients" element={<Clients />} />
         <Route path="test" element={<TestBooking />} />
+        <Route path="vapi" element={<VapiSetup />} />
         <Route path="logs" element={<Logs />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

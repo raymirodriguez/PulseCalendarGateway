@@ -1,10 +1,11 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, CalendarCheck, ScrollText } from 'lucide-react'
+import { LayoutDashboard, Users, CalendarCheck, ScrollText, Webhook } from 'lucide-react'
 
 const NAV = [
   { to: '/', end: true, icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/clients', icon: Users, label: 'Clients' },
   { to: '/test', icon: CalendarCheck, label: 'Test Booking' },
+  { to: '/vapi', icon: Webhook, label: 'VAPI Setup' },
   { to: '/logs', icon: ScrollText, label: 'Logs' },
 ]
 
