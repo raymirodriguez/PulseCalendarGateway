@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Send, Calendar, BookCheck } from 'lucide-react'
+import { Send, Calendar, BookCheck, FlaskConical } from 'lucide-react'
 import { supabase } from '../lib/supabase.js'
 import Card, { SectionHeading } from '../components/ui/Card.jsx'
 import Button from '../components/ui/Button.jsx'
@@ -161,9 +161,57 @@ export default function TestBooking() {
     }))
   }
 
+  // ── Calendar integration test ──
+  const [calTest, setCalTest] = useState({ calendarId: 'info@futura-ai.solutions', attendeeEmail: '' })
+  const [calTestResult, setCalTestResult] = useState(null)
+  const [calTestLoading, setCalTestLoading] = useState(false)
+
+  async function runCalendarTest(e) {
+    e.preventDefault()
+    setCalTestLoading(true)
+    setCalTestResult(null)
+    try {
+      const res = await fetch('/api/test-calendar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+        body: JSON.stringify(calTest),
+      })
+      setCalTestResult(await res.json())
+    } catch (err) {
+      setCalTestResult({ success: false, reason: 'FETCH_ERROR', message: err.message })
+    }
+    setCalTestLoading(false)
+  }
+
   return (
     <div>
       <SectionHeading sub="Run live API calls against real client configurations">Test Booking</SectionHeading>
+
+      {/* ── Google Calendar Integration Test ── */}
+      <Card accent style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: '1rem' }}>
+          <FlaskConical size={16} color="var(--teal)" />
+          <h3 style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 400, fontSize: 18, color: 'var(--white)', margin: 0 }}>
+            Google Calendar Integration Test
+          </h3>
+          <span style={{ fontSize: 11, color: 'var(--label)', background: 'var(--teal-dim)', padding: '2px 10px', borderRadius: 20, letterSpacing: '0.05em' }}>
+            Domain-Wide Delegation check
+          </span>
+        </div>
+        <form onSubmit={runCalendarTest} style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
+          <Input label="Calendar ID" id="ct-cal" value={calTest.calendarId}
+            onChange={e => setCalTest(t => ({ ...t, calendarId: e.target.value }))}
+            style={{ flex: 1 }} />
+          <Input label="Send Invite To (optional)" id="ct-email" type="email" value={calTest.attendeeEmail}
+            placeholder="attendee@example.com"
+            onChange={e => setCalTest(t => ({ ...t, attendeeEmail: e.target.value }))}
+            style={{ flex: 1 }} />
+          <Button type="submit" disabled={!apiKey || calTestLoading} style={{ flexShrink: 0, marginBottom: 1 }}>
+            <FlaskConical size={13} />{calTestLoading ? 'Testing…' : 'Run Test'}
+          </Button>
+        </form>
+        <RawResponse data={calTestResult} label="Integration test result" />
+      </Card>
 
       <Card style={{ marginBottom: 20 }}>
         <p style={{ fontSize: 12, color: 'var(--label)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 10px' }}>Client & API Key</p>
