@@ -2,7 +2,7 @@ import { validateApiKey } from './_utils/auth.js'
 import { findAvailableSlots } from './_utils/scheduling-engine.js'
 import { listEvents } from './_utils/google-calendar.js'
 import { log } from './_utils/logger.js'
-import { fromZonedTime } from 'date-fns-tz'
+import { fromZonedTime, formatInTimeZone } from 'date-fns-tz'
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -36,9 +36,8 @@ export const handler = async (event) => {
   }
 
   try {
-    // Fetch the full day's events in the client timezone
     const dayStart = fromZonedTime(`${preferredDay} 00:00:00`, client.timezone)
-    const dayEnd = fromZonedTime(`${preferredDay} 23:59:59`, client.timezone)
+    const dayEnd   = fromZonedTime(`${preferredDay} 23:59:59`, client.timezone)
 
     const existingEvents = await listEvents(client.calendar_id, dayStart, dayEnd)
     const slots = findAvailableSlots(client, existingEvents, preferredDay, preferredPeriod, timezone)
@@ -50,11 +49,23 @@ export const handler = async (event) => {
       response: { slotsFound: slots.length },
     })
 
-    if (slots.length === 0) {
-      return json(200, { success: false, reason: 'NO_SLOTS_AVAILABLE', slots: [] })
+    // Map to the public shape: { start, end, label }
+    const availableSlots = slots.map(slot => ({
+      start: slot.start,
+      end:   slot.end,
+      label: formatInTimeZone(new Date(slot.start), timezone, "EEEE, MMMM d 'at' h:mm a zzzz"),
+    }))
+
+    if (availableSlots.length === 0) {
+      return json(200, {
+        success:        true,
+        availableSlots: [],
+        reason:         'NO_AVAILABLE_SLOTS',
+      })
     }
 
-    return json(200, { success: true, slots, clientTimezone: client.timezone })
+    return json(200, { success: true, availableSlots })
+
   } catch (err) {
     console.error('[check-availability]', err)
     await log({ clientId: client.id, type: 'error', payload: body, error: err })

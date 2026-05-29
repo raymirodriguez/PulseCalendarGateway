@@ -30,21 +30,46 @@ export const handler = async (event) => {
   if (!client) return json(401, { success: false, reason: 'UNAUTHORIZED' })
 
   const { name, businessName, email, phone, slot, timezone, notes } = body
-  if (!name || !slot?.start || !slot?.end || !timezone) {
-    return json(400, { success: false, reason: 'MISSING_FIELDS', required: ['name', 'slot.start', 'slot.end', 'timezone'] })
+
+  // ── 1. Structured request log ────────────────────────────────────────────────
+  console.log('[book-appointment] REQUEST', {
+    clientId: client.id,
+    name:         name         ?? null,
+    businessName: businessName ?? null,
+    email:        email        ?? null,
+    phone:        phone        ?? null,
+    timezone:     timezone     ?? null,
+    slotStart:    slot?.start  ?? null,
+    slotEnd:      slot?.end    ?? null,
+    hasNotes:     !!notes,
+  })
+
+  // ── 2. Required-field validation ─────────────────────────────────────────────
+  const missing = []
+  if (!name)            missing.push('name')
+  if (!businessName)    missing.push('businessName')
+  if (!email)           missing.push('email')
+  if (!phone)           missing.push('phone')
+  if (!timezone)        missing.push('timezone')
+  if (!slot?.start)     missing.push('slot.start')
+  if (!slot?.end)       missing.push('slot.end')
+
+  if (missing.length > 0) {
+    console.warn('[book-appointment] MISSING_REQUIRED_FIELDS', missing)
+    return json(400, { success: false, reason: 'MISSING_REQUIRED_FIELDS', missingFields: missing })
   }
 
   const slotStart = new Date(slot.start)
-  const slotEnd = new Date(slot.end)
+  const slotEnd   = new Date(slot.end)
   if (isNaN(slotStart) || isNaN(slotEnd)) {
     return json(400, { success: false, reason: 'INVALID_SLOT', message: 'slot.start and slot.end must be valid ISO strings' })
   }
 
   try {
-    // Re-check availability before booking (FR-005 overlap prevention)
+    // ── Overlap prevention (FR-005) ──────────────────────────────────────────
     const preferredDay = formatInTimeZone(slotStart, client.timezone, 'yyyy-MM-dd')
     const dayStart = fromZonedTime(`${preferredDay} 00:00:00`, client.timezone)
-    const dayEnd = fromZonedTime(`${preferredDay} 23:59:59`, client.timezone)
+    const dayEnd   = fromZonedTime(`${preferredDay} 23:59:59`, client.timezone)
 
     const existingEvents = await listEvents(client.calendar_id, dayStart, dayEnd)
     if (hasConflict(slotStart, slotEnd, existingEvents, client.buffers)) {
@@ -52,44 +77,86 @@ export const handler = async (event) => {
       return json(409, { success: false, reason: 'TIME_SLOT_UNAVAILABLE' })
     }
 
-    // Build calendar event
-    const title = `Discovery Call — ${businessName || name} + Futura AI Solutions`
+    // ── Build and create Google Calendar event ───────────────────────────────
+    const title = `Discovery Call — ${businessName} + Futura AI Solutions`
     const description = [
       `Caller: ${name}`,
-      businessName ? `Business: ${businessName}` : '',
-      email ? `Email: ${email}` : '',
-      phone ? `Phone/WhatsApp: ${phone}` : '',
+      `Business: ${businessName}`,
+      `Email: ${email}`,
+      `Phone/WhatsApp: ${phone}`,
       `Timezone: ${timezone}`,
       notes ? `\nContext:\n${notes}` : '',
     ].filter(Boolean).join('\n')
 
-    const attendees = []
-    if (email) attendees.push({ email })
+    const attendees = [{ email }]
     if (client.fallback_email) attendees.push({ email: client.fallback_email })
 
-    const googleEvent = await createEvent(client.calendar_id, {
-      summary: title,
-      description,
-      start: { dateTime: slotStart.toISOString(), timeZone: client.timezone },
-      end: { dateTime: slotEnd.toISOString(), timeZone: client.timezone },
-      attendees,
+    let googleEvent
+    try {
+      googleEvent = await createEvent(client.calendar_id, {
+        summary: title,
+        description,
+        start: { dateTime: slotStart.toISOString(), timeZone: client.timezone },
+        end:   { dateTime: slotEnd.toISOString(),   timeZone: client.timezone },
+        attendees,
+      })
+    } catch (calErr) {
+      // ── 5. Catch Google Calendar errors with full detail ─────────────────
+      const errCode = calErr?.response?.status ?? calErr?.code ?? 'unknown'
+      const errBody = calErr?.response?.data   ?? null
+      console.error('[book-appointment] GOOGLE_CALENDAR_ERROR', {
+        message: calErr.message,
+        code:    errCode,
+        body:    errBody,
+      })
+      await log({
+        clientId: client.id,
+        type: 'error',
+        payload: { step: 'create_event', slot: { start: slotStart.toISOString(), end: slotEnd.toISOString() } },
+        error: calErr,
+      })
+      return json(500, {
+        success: false,
+        reason:  'GOOGLE_CALENDAR_CREATE_FAILED',
+        message: calErr.message,
+      })
+    }
+
+    // ── 3 & 4. Verify Google returned a real event ID ────────────────────────
+    if (!googleEvent?.id) {
+      console.error('[book-appointment] NO_EVENT_ID_RETURNED', googleEvent)
+      await log({
+        clientId: client.id,
+        type: 'error',
+        payload: { step: 'verify_event_id' },
+        error: 'Google Calendar did not return an event ID',
+      })
+      return json(500, { success: false, reason: 'NO_EVENT_ID_RETURNED' })
+    }
+
+    // ── 8. Log successful event creation ─────────────────────────────────────
+    console.log('GOOGLE_EVENT_CREATED', {
+      id:       googleEvent.id,
+      htmlLink: googleEvent.htmlLink,
+      start:    googleEvent.start?.dateTime,
+      end:      googleEvent.end?.dateTime,
     })
 
-    // Persist booking
+    // ── Persist booking to Supabase ──────────────────────────────────────────
     const { data: booking } = await supabase
       .from('bookings')
       .insert({
-        client_id: client.id,
-        caller_name: name,
-        business_name: businessName ?? null,
-        email: email ?? null,
-        phone: phone ?? null,
-        slot_start: slotStart.toISOString(),
-        slot_end: slotEnd.toISOString(),
+        client_id:       client.id,
+        caller_name:     name,
+        business_name:   businessName,
+        email,
+        phone,
+        slot_start:      slotStart.toISOString(),
+        slot_end:        slotEnd.toISOString(),
         timezone,
-        notes: notes ?? null,
+        notes:           notes ?? null,
         google_event_id: googleEvent.id,
-        status: 'confirmed',
+        status:          'confirmed',
       })
       .select()
       .single()
@@ -97,22 +164,22 @@ export const handler = async (event) => {
     await log({
       clientId: client.id,
       type: 'booking_success',
-      payload: body,
+      payload: { name, businessName, email, phone, timezone, slot },
       response: { bookingId: booking?.id, googleEventId: googleEvent.id },
     })
 
+    // ── 3. Success response with eventId and htmlLink ────────────────────────
     return json(200, {
-      success: true,
-      bookingId: booking?.id,
-      googleEventId: googleEvent.id,
-      slot: {
-        start: slotStart.toISOString(),
-        end: slotEnd.toISOString(),
-        display: formatInTimeZone(slotStart, timezone, "EEEE, MMMM d, yyyy 'at' h:mm a zzz"),
-      },
+      success:   true,
+      eventId:   googleEvent.id,
+      htmlLink:  googleEvent.htmlLink ?? null,
+      bookingId: booking?.id ?? null,
+      start:     googleEvent.start?.dateTime ?? slotStart.toISOString(),
+      end:       googleEvent.end?.dateTime   ?? slotEnd.toISOString(),
     })
+
   } catch (err) {
-    console.error('[book-appointment]', err)
+    console.error('[book-appointment] UNHANDLED_ERROR', err)
     await log({ clientId: client.id, type: 'error', payload: body, error: err })
     return json(500, { success: false, reason: 'INTERNAL_ERROR', message: err.message })
   }

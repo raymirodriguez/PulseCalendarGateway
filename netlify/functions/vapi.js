@@ -49,7 +49,7 @@ async function handleCheckAvailability(client, args) {
   })
 
   if (slots.length === 0) {
-    return `I'm sorry, there are no available slots on ${preferredDay} in the ${preferredPeriod}. Could you ask the caller if they'd like to try a different day or time period?`
+    return `I'm sorry, there are no available slots on ${preferredDay} in the ${preferredPeriod}. Please ask the caller if they'd like to try a different day or time period.`
   }
 
   const lines = slots.map((slot, i) => {
@@ -60,15 +60,27 @@ async function handleCheckAvailability(client, args) {
   return [
     `I found ${slots.length} available slot${slots.length > 1 ? 's' : ''}:`,
     ...lines,
-    'Please present these options to the caller and ask which they prefer. Once they confirm, use bookAppointment with the corresponding slot_start and slot_end values.',
+    'Present these options to the caller. Once they confirm a specific slot, call bookAppointment with the exact slot_start and slot_end values shown above.',
   ].join('\n')
 }
+
+const BOOKING_FALLBACK = "I've captured your details, and our team will confirm the calendar invite shortly."
 
 async function handleBookAppointment(client, args) {
   const { name, businessName, email, phone, slotStart, slotEnd, timezone, notes } = args
 
-  if (!name || !slotStart || !slotEnd || !timezone) {
-    return 'I need the caller\'s name, the slot start and end times, and their timezone to complete the booking.'
+  // ── Field validation ────────────────────────────────────────────────────────
+  const missing = []
+  if (!name)         missing.push('name')
+  if (!businessName) missing.push('businessName')
+  if (!email)        missing.push('email')
+  if (!phone)        missing.push('phone')
+  if (!slotStart)    missing.push('slotStart')
+  if (!slotEnd)      missing.push('slotEnd')
+  if (!timezone)     missing.push('timezone')
+
+  if (missing.length > 0) {
+    return `I still need the following details before I can book: ${missing.join(', ')}. Could you gather that from the caller?`
   }
 
   const start = new Date(slotStart)
@@ -78,7 +90,7 @@ async function handleBookAppointment(client, args) {
     return 'The slot times provided are not valid. Please use the exact slot_start and slot_end values returned by checkAvailability.'
   }
 
-  // Re-check for overlap before creating (FR-005)
+  // ── Overlap prevention (FR-005) ─────────────────────────────────────────────
   const preferredDay = formatInTimeZone(start, client.timezone, 'yyyy-MM-dd')
   const dayStart = fromZonedTime(`${preferredDay} 00:00:00`, client.timezone)
   const dayEnd   = fromZonedTime(`${preferredDay} 23:59:59`, client.timezone)
@@ -89,42 +101,65 @@ async function handleBookAppointment(client, args) {
     return 'I\'m sorry, that slot was just taken. Please ask the caller if they\'d like to check availability again for a different time.'
   }
 
-  const title = `Discovery Call — ${businessName || name} + Futura AI Solutions`
+  // ── Create Google Calendar event ────────────────────────────────────────────
+  const title = `Discovery Call — ${businessName} + Futura AI Solutions`
   const description = [
     `Caller: ${name}`,
-    businessName ? `Business: ${businessName}` : '',
-    email  ? `Email: ${email}`           : '',
-    phone  ? `Phone/WhatsApp: ${phone}`  : '',
+    `Business: ${businessName}`,
+    `Email: ${email}`,
+    `Phone/WhatsApp: ${phone}`,
     `Timezone: ${timezone}`,
-    notes  ? `\nContext:\n${notes}`      : '',
+    notes ? `\nContext:\n${notes}` : '',
   ].filter(Boolean).join('\n')
 
-  const attendees = []
-  if (email) attendees.push({ email })
+  const attendees = [{ email }]
   if (client.fallback_email) attendees.push({ email: client.fallback_email })
 
-  const googleEvent = await createEvent(client.calendar_id, {
-    summary: title,
-    description,
-    start: { dateTime: start.toISOString(), timeZone: client.timezone },
-    end:   { dateTime: end.toISOString(),   timeZone: client.timezone },
-    attendees,
+  let googleEvent
+  try {
+    googleEvent = await createEvent(client.calendar_id, {
+      summary: title,
+      description,
+      start: { dateTime: start.toISOString(), timeZone: client.timezone },
+      end:   { dateTime: end.toISOString(),   timeZone: client.timezone },
+      attendees,
+    })
+  } catch (calErr) {
+    const errCode = calErr?.response?.status ?? calErr?.code ?? 'unknown'
+    console.error('[vapi] GOOGLE_CALENDAR_CREATE_FAILED', { message: calErr.message, code: errCode })
+    await log({ clientId: client.id, type: 'error', payload: { tool: 'bookAppointment', step: 'create_event' }, error: calErr })
+    return BOOKING_FALLBACK
+  }
+
+  // ── Require a real event ID before confirming ───────────────────────────────
+  if (!googleEvent?.id) {
+    console.error('[vapi] NO_EVENT_ID_RETURNED', googleEvent)
+    await log({ clientId: client.id, type: 'error', payload: { tool: 'bookAppointment', step: 'verify_event_id' }, error: 'No event ID returned' })
+    return BOOKING_FALLBACK
+  }
+
+  console.log('GOOGLE_EVENT_CREATED', {
+    id:       googleEvent.id,
+    htmlLink: googleEvent.htmlLink,
+    start:    googleEvent.start?.dateTime,
+    end:      googleEvent.end?.dateTime,
   })
 
+  // ── Persist booking ─────────────────────────────────────────────────────────
   const { data: booking } = await supabase
     .from('bookings')
     .insert({
-      client_id:      client.id,
-      caller_name:    name,
-      business_name:  businessName ?? null,
-      email:          email        ?? null,
-      phone:          phone        ?? null,
-      slot_start:     start.toISOString(),
-      slot_end:       end.toISOString(),
+      client_id:       client.id,
+      caller_name:     name,
+      business_name:   businessName,
+      email,
+      phone,
+      slot_start:      start.toISOString(),
+      slot_end:        end.toISOString(),
       timezone,
-      notes:          notes        ?? null,
+      notes:           notes ?? null,
       google_event_id: googleEvent.id,
-      status:         'confirmed',
+      status:          'confirmed',
     })
     .select()
     .single()
@@ -132,18 +167,19 @@ async function handleBookAppointment(client, args) {
   await log({
     clientId: client.id,
     type: 'booking_success',
-    payload: args,
+    payload: { name, businessName, email, phone, timezone, slotStart, slotEnd },
     response: { bookingId: booking?.id, googleEventId: googleEvent.id },
   })
 
+  // ── success === true AND eventId exists → confirm to caller ─────────────────
   const displayTime = formatInTimeZone(start, timezone, "EEEE, MMMM d 'at' h:mm a zzz")
   return [
     `The appointment has been confirmed.`,
     `${name} is booked for ${displayTime}.`,
-    email ? `A calendar invite has been sent to ${email}.` : '',
+    `A calendar invite has been sent to ${email}.`,
     `Booking reference: ${booking?.id ?? googleEvent.id}.`,
     'Please let the caller know their appointment is confirmed and they should expect a calendar invite shortly.',
-  ].filter(Boolean).join(' ')
+  ].join(' ')
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
