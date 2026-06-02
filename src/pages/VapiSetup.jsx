@@ -9,6 +9,19 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'getCurrentTime',
+      description:
+        'Returns the current date and time in the business timezone. Call this at the start of every conversation before asking about preferred days, so you can correctly interpret relative dates like "tomorrow" or "next Monday".',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'checkAvailability',
       description:
         'Check available appointment slots. Call this when the caller mentions a preferred day or time period. Always call this before bookAppointment.',
@@ -80,7 +93,7 @@ const TOOL_DEFINITIONS = [
               'Brief summary of the conversation: what the caller does, why they are interested, any relevant context.',
           },
         },
-        required: ['name', 'slotStart', 'slotEnd', 'timezone'],
+        required: ['name', 'businessName', 'email', 'phone', 'slotStart', 'slotEnd', 'timezone'],
       },
     },
   },
@@ -209,7 +222,7 @@ export default function VapiSetup() {
       <Step n="4" title="Add the tool definitions to your VAPI assistant">
         <p style={{ color: 'var(--muted)', fontSize: 13, margin: '0 0 12px', lineHeight: 1.6 }}>
           In the VAPI assistant editor, go to <strong style={{ color: 'var(--white)' }}>Tools</strong> and add
-          these two function definitions. VAPI will automatically call them during conversations when appropriate.
+          these three function definitions. VAPI will automatically call them during conversations when appropriate.
         </p>
         <CopyBlock
           label="Tool definitions — paste into VAPI Tools (JSON)"
