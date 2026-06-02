@@ -3,7 +3,7 @@ import { hasConflict } from './_utils/scheduling-engine.js'
 import { listEvents, createEvent } from './_utils/google-calendar.js'
 import { log } from './_utils/logger.js'
 import { normalizeSlot } from './_utils/normalize-slot.js'
-import { sendBookingConfirmation } from './_utils/whatsapp.js'
+import { sendBookingConfirmation, sendBusinessNotification } from './_utils/whatsapp.js'
 import { createClient } from '@supabase/supabase-js'
 import { fromZonedTime, formatInTimeZone } from 'date-fns-tz'
 
@@ -191,6 +191,26 @@ export const handler = async (event) => {
       payload: { phone, name },
       response: whatsapp.sent ? { sid: whatsapp.sid } : null,
       error:   whatsapp.sent ? null : whatsapp.error,
+    })
+
+    // ── Notify Futura AI Solutions ────────────────────────────────────────────
+    const bizNotif = await sendBusinessNotification({
+      name,
+      businessName,
+      email,
+      phone,
+      start: slotStart.toISOString(),
+      timezone,
+      notes: notes ?? null,
+      bookingId: booking?.id ?? googleEvent.id,
+    })
+
+    await log({
+      clientId: client.id,
+      type:    bizNotif.sent ? 'whatsapp_business_notified' : 'whatsapp_business_notify_failed',
+      payload: { bookingId: booking?.id ?? googleEvent.id },
+      response: bizNotif.sent ? { sid: bizNotif.sid } : null,
+      error:   bizNotif.sent ? null : bizNotif.error,
     })
 
     return json(200, {
