@@ -52,7 +52,7 @@ export const handler = async (event) => {
     // Map to the public shape: { start, end, label }
     const availableSlots = slots.map(slot => ({
       start: slot.start,
-      end:   slot.end,
+      end:   slot.end ?? new Date(new Date(slot.start).getTime() + 20 * 60 * 1000).toISOString(),
       label: formatInTimeZone(new Date(slot.start), timezone, "EEEE, MMMM d 'at' h:mm a zzzz"),
     }))
 

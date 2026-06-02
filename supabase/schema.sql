@@ -73,4 +73,8 @@ create policy "anon read clients"  on clients  for select using (true);
 create policy "anon read bookings" on bookings for select using (true);
 create policy "anon read logs"     on logs     for select using (true);
 
+create policy "anon write clients"  on clients  for all using (true) with check (true);
+create policy "anon write bookings" on bookings for all using (true) with check (true);
+create policy "anon write logs"     on logs     for all using (true) with check (true);
+
 -- Service role (used by Netlify Functions) bypasses RLS automatically.

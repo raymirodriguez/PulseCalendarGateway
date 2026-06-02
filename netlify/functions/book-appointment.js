@@ -2,6 +2,8 @@ import { validateApiKey } from './_utils/auth.js'
 import { hasConflict } from './_utils/scheduling-engine.js'
 import { listEvents, createEvent } from './_utils/google-calendar.js'
 import { log } from './_utils/logger.js'
+import { normalizeSlot } from './_utils/normalize-slot.js'
+import { sendBookingConfirmation } from './_utils/whatsapp.js'
 import { createClient } from '@supabase/supabase-js'
 import { fromZonedTime, formatInTimeZone } from 'date-fns-tz'
 
@@ -29,22 +31,29 @@ export const handler = async (event) => {
   const client = await validateApiKey(event.headers)
   if (!client) return json(401, { success: false, reason: 'UNAUTHORIZED' })
 
-  const { name, businessName, email, phone, slot, timezone, notes } = body
+  const { name, businessName, email, phone, timezone, notes } = body
 
   // ── 1. Structured request log ────────────────────────────────────────────────
-  console.log('[book-appointment] REQUEST', {
-    clientId: client.id,
-    name:         name         ?? null,
-    businessName: businessName ?? null,
-    email:        email        ?? null,
-    phone:        phone        ?? null,
-    timezone:     timezone     ?? null,
-    slotStart:    slot?.start  ?? null,
-    slotEnd:      slot?.end    ?? null,
-    hasNotes:     !!notes,
+  console.log('BOOK_APPOINTMENT_INPUT', {
+    name:         body.name,
+    businessName: body.businessName,
+    email:        body.email,
+    phone:        body.phone,
+    timezone:     body.timezone,
+    slot:         body.slot,
+    hasNotes:     Boolean(body.notes),
   })
 
-  // ── 2. Required-field validation ─────────────────────────────────────────────
+  // ── 2. Normalize slot (auto-calculate end if missing) ────────────────────────
+  const { slot: normalizedSlot, error: slotError } = normalizeSlot(body.slot)
+  if (slotError) {
+    return json(400, { success: false, reason: slotError.reason, message: slotError.message })
+  }
+  const slot = normalizedSlot
+
+  console.log('BOOK_APPOINTMENT_NORMALIZED_SLOT', slot)
+
+  // ── 3. Required-field validation ─────────────────────────────────────────────
   const missing = []
   if (!name)            missing.push('name')
   if (!businessName)    missing.push('businessName')
@@ -134,12 +143,11 @@ export const handler = async (event) => {
       return json(500, { success: false, reason: 'NO_EVENT_ID_RETURNED' })
     }
 
-    // ── 8. Log successful event creation ─────────────────────────────────────
     console.log('GOOGLE_EVENT_CREATED', {
-      id:       googleEvent.id,
-      htmlLink: googleEvent.htmlLink,
-      start:    googleEvent.start?.dateTime,
-      end:      googleEvent.end?.dateTime,
+      id:       googleEvent?.id,
+      htmlLink: googleEvent?.htmlLink,
+      start:    googleEvent?.start,
+      end:      googleEvent?.end,
     })
 
     // ── Persist booking to Supabase ──────────────────────────────────────────
@@ -168,14 +176,32 @@ export const handler = async (event) => {
       response: { bookingId: booking?.id, googleEventId: googleEvent.id },
     })
 
-    // ── 3. Success response with eventId and htmlLink ────────────────────────
+    // ── Send WhatsApp confirmation ────────────────────────────────────────────
+    const whatsapp = await sendBookingConfirmation({
+      name,
+      businessName,
+      phone,
+      start: slotStart.toISOString(),
+      timezone,
+    })
+
+    await log({
+      clientId: client.id,
+      type:    whatsapp.sent ? 'whatsapp_sent' : 'whatsapp_failed',
+      payload: { phone, name },
+      response: whatsapp.sent ? { sid: whatsapp.sid } : null,
+      error:   whatsapp.sent ? null : whatsapp.error,
+    })
+
     return json(200, {
-      success:   true,
-      eventId:   googleEvent.id,
-      htmlLink:  googleEvent.htmlLink ?? null,
-      bookingId: booking?.id ?? null,
-      start:     googleEvent.start?.dateTime ?? slotStart.toISOString(),
-      end:       googleEvent.end?.dateTime   ?? slotEnd.toISOString(),
+      success:      true,
+      eventId:      googleEvent.id,
+      htmlLink:     googleEvent.htmlLink ?? null,
+      bookingId:    booking?.id ?? null,
+      start:        googleEvent.start?.dateTime ?? slotStart.toISOString(),
+      end:          googleEvent.end?.dateTime   ?? slotEnd.toISOString(),
+      whatsappSent: whatsapp.sent,
+      ...(whatsapp.sent ? {} : { whatsappError: whatsapp.error }),
     })
 
   } catch (err) {

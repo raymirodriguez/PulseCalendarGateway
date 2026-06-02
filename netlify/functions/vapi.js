@@ -2,8 +2,11 @@ import { getClientByAssistantId } from './_utils/client-config.js'
 import { findAvailableSlots, hasConflict } from './_utils/scheduling-engine.js'
 import { listEvents, createEvent } from './_utils/google-calendar.js'
 import { log } from './_utils/logger.js'
+import { sendBookingConfirmation, sendBusinessNotification } from './_utils/whatsapp.js'
 import { createClient } from '@supabase/supabase-js'
 import { fromZonedTime, formatInTimeZone } from 'date-fns-tz'
+
+const BUSINESS_TIMEZONE = 'America/Mexico_City'
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
 
@@ -27,6 +30,13 @@ function parseArgs(raw) {
 }
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
+
+function handleGetCurrentTime() {
+  const now = new Date()
+  const display = formatInTimeZone(now, BUSINESS_TIMEZONE, "EEEE, MMMM d, yyyy 'at' h:mm a zzz")
+  const isoDate = formatInTimeZone(now, BUSINESS_TIMEZONE, 'yyyy-MM-dd')
+  return `The current date and time is ${display}. Use ${isoDate} as today's date when calling checkAvailability.`
+}
 
 async function handleCheckAvailability(client, args) {
   const { timezone, preferredDay, preferredPeriod } = args
@@ -171,15 +181,53 @@ async function handleBookAppointment(client, args) {
     response: { bookingId: booking?.id, googleEventId: googleEvent.id },
   })
 
-  // ── success === true AND eventId exists → confirm to caller ─────────────────
+  // ── Send WhatsApp confirmation ────────────────────────────────────────────
+  const whatsapp = await sendBookingConfirmation({
+    name,
+    businessName,
+    phone,
+    start: start.toISOString(),
+    timezone,
+  })
+
+  await log({
+    clientId: client.id,
+    type:    whatsapp.sent ? 'whatsapp_sent' : 'whatsapp_failed',
+    payload: { phone, name },
+    response: whatsapp.sent ? { sid: whatsapp.sid } : null,
+    error:   whatsapp.sent ? null : whatsapp.error,
+  })
+
+  // ── Notify Futura AI Solutions ────────────────────────────────────────────
+  const bizNotif = await sendBusinessNotification({
+    name,
+    businessName,
+    email,
+    phone,
+    start: start.toISOString(),
+    timezone,
+    notes: notes ?? null,
+    bookingId: booking?.id ?? googleEvent.id,
+  })
+
+  await log({
+    clientId: client.id,
+    type:    bizNotif.sent ? 'whatsapp_business_notified' : 'whatsapp_business_notify_failed',
+    payload: { bookingId: booking?.id ?? googleEvent.id },
+    response: bizNotif.sent ? { sid: bizNotif.sid } : null,
+    error:   bizNotif.sent ? null : bizNotif.error,
+  })
+
+  // ── Confirm to caller ─────────────────────────────────────────────────────
   const displayTime = formatInTimeZone(start, timezone, "EEEE, MMMM d 'at' h:mm a zzz")
   return [
     `The appointment has been confirmed.`,
     `${name} is booked for ${displayTime}.`,
     `A calendar invite has been sent to ${email}.`,
+    whatsapp.sent ? `A WhatsApp confirmation has also been sent to ${phone}.` : '',
     `Booking reference: ${booking?.id ?? googleEvent.id}.`,
     'Please let the caller know their appointment is confirmed and they should expect a calendar invite shortly.',
-  ].join(' ')
+  ].filter(Boolean).join(' ')
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -227,7 +275,9 @@ export const handler = async (event) => {
 
       try {
         let result
-        if (name === 'checkAvailability') {
+        if (name === 'getCurrentTime') {
+          result = handleGetCurrentTime()
+        } else if (name === 'checkAvailability') {
           result = await handleCheckAvailability(client, args)
         } else if (name === 'bookAppointment') {
           result = await handleBookAppointment(client, args)
